@@ -200,6 +200,18 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 		echo "$dns: invalid selection."
 		read -p "DNS server [1]: " dns
 	done
+
+	echo
+	echo "Select a subnet network for the clients:"
+	echo "   1) 172.16.x.0/24"
+
+	until [[ -z "$subnet" || "$subnet" =~ ^[1-250]$ ]]; do
+		echo "$subnet: invalid selection. "
+		read -p "Subnet Select [1]: " dns
+		network="172.16.$subnet.0"
+		echo "OpenVpn Client Network: $network"
+	done
+
 	echo
 	echo "Enter a name for the first client:"
 	read -p "Name [client]: " unsanitized_client
@@ -270,6 +282,12 @@ YdEIqUuyyOP7uWrat2DX9GgdT0Kj3jlN9K5W7edjcrsZCwenyO4KbXCeAvzhzffi
 7MA0BM0oNC9hkXL+nOmFg/+OTxIy7vKBg8P+OxtMb61zO7X8vC7CIAXFjvGDfRaD
 ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
 -----END DH PARAMETERS-----' > /etc/openvpn/server/dh.pem
+	
+	# copy checkpsw to openvpn
+    cp -rp ./checkpsw.sh  /etc/openvpn/server/checkpsw.sh
+	chmod +x /etc/openvpn/checkpsw.sh
+	# make psw-file
+	echo "lisonlin mpower22" > /etc/openvpn/psw-file
 	# Generate server.conf
 	echo "local $ip
 port $port
@@ -282,7 +300,10 @@ dh dh.pem
 auth SHA512
 tls-crypt tc.key
 topology subnet
-server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
+server $network 255.255.255.0
+auth-user-pass-verify /etc/openvpn/checkpsw.sh via-env
+username-as-common-name
+script-security 3" > /etc/openvpn/server/server.conf
 	# IPv6
 	if [[ -z "$ip6" ]]; then
 		echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
@@ -290,6 +311,7 @@ server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
 		echo 'server-ipv6 fddd:1194:1194:1194::/64' >> /etc/openvpn/server/server.conf
 		echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
 	fi
+
 	echo 'ifconfig-pool-persist ipp.txt' >> /etc/openvpn/server/server.conf
 	# DNS
 	case "$dns" in
@@ -380,13 +402,13 @@ crl-verify crl.pem" >> /etc/openvpn/server/server.conf
 Before=network.target
 [Service]
 Type=oneshot
-ExecStart=$iptables_path -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $ip
+ExecStart=$iptables_path -t nat -A POSTROUTING -s $network/24 ! -d $network/24 -j SNAT --to $ip
 ExecStart=$iptables_path -I INPUT -p $protocol --dport $port -j ACCEPT
-ExecStart=$iptables_path -I FORWARD -s 10.8.0.0/24 -j ACCEPT
+ExecStart=$iptables_path -I FORWARD -s $network/24 -j ACCEPT
 ExecStart=$iptables_path -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-ExecStop=$iptables_path -t nat -D POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $ip
+ExecStop=$iptables_path -t nat -D POSTROUTING -s $network/24 ! -d $network/24 -j SNAT --to $ip
 ExecStop=$iptables_path -D INPUT -p $protocol --dport $port -j ACCEPT
-ExecStop=$iptables_path -D FORWARD -s 10.8.0.0/24 -j ACCEPT
+ExecStop=$iptables_path -D FORWARD -s $network/24 -j ACCEPT
 ExecStop=$iptables_path -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" > /etc/systemd/system/openvpn-iptables.service
 		if [[ -n "$ip6" ]]; then
 			echo "ExecStart=$ip6tables_path -t nat -A POSTROUTING -s fddd:1194:1194:1194::/64 ! -d fddd:1194:1194:1194::/64 -j SNAT --to $ip6
@@ -428,6 +450,7 @@ persist-key
 persist-tun
 remote-cert-tls server
 auth SHA512
+auth-user-pass
 ignore-unknown-option block-outside-dns
 verb 3" > /etc/openvpn/server/client-common.txt
 	# Enable and start the OpenVPN service
