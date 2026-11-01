@@ -126,18 +126,18 @@ EOF
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 
-resolve_psw_admin () {
+resolve_openvpn_admin () {
 	local candidate
-	for candidate in "${PSW_ADMIN_BIN:-}" "$SCRIPT_DIR/openvpn-admin" "$SCRIPT_DIR/../openvpn-admin" "$(command -v openvpn-admin 2>/dev/null || true)" "$(command -v psw-admin 2>/dev/null || true)" "$SCRIPT_DIR/../psw-admin"; do
+	for candidate in "${OPENVPN_ADMIN_BIN:-${PSW_ADMIN_BIN:-}}" "$SCRIPT_DIR/openvpn-admin" "$SCRIPT_DIR/../openvpn-admin" "$(command -v openvpn-admin 2>/dev/null || true)"; do
 		if [[ -n "$candidate" && -x "$candidate" ]]; then
-			psw_admin_source=$(readlink -f -- "$candidate")
+			openvpn_admin_source=$(readlink -f -- "$candidate")
 			return 0
 		fi
 	done
 	return 1
 }
 
-configure_psw_admin_auth () {
+configure_openvpn_admin_auth () {
 	local config=/etc/openvpn/server/server.conf tmp
 	tmp=$(mktemp)
 	awk '
@@ -147,7 +147,7 @@ configure_psw_admin_auth () {
 		END { if (!security_seen) print "script-security 3" }
 	' "$config" > "$tmp" || { rm -f "$tmp"; return 1; }
 	cat >> "$tmp" <<'EOF'
-auth-user-pass-verify "/usr/local/bin/psw-admin verify-file -file /etc/openvpn/psw-file" via-file
+auth-user-pass-verify "/usr/local/bin/openvpn-admin verify-file -file /etc/openvpn/psw-file" via-file
 username-as-common-name
 status /etc/openvpn/server/openvpn-status.log 5
 status-version 1
@@ -155,10 +155,10 @@ EOF
 	cat "$tmp" > "$config" && rm -f "$tmp"
 }
 
-install_psw_admin () {
+install_openvpn_admin () {
 	local group_id env_file unit_file admin_password
-	if ! resolve_psw_admin; then
-		echo "openvpn-admin binary not found. Build it into this directory or set PSW_ADMIN_BIN to its path."
+	if ! resolve_openvpn_admin; then
+		echo "openvpn-admin binary not found. Build it into this directory or set OPENVPN_ADMIN_BIN to its path."
 		return 1
 	fi
 	group_id=$(getent group "$group_name" | cut -d: -f3)
@@ -166,7 +166,7 @@ install_psw_admin () {
 		echo "OpenVPN group '$group_name' was not found."
 		return 1
 	fi
-	install -o root -g root -m 0755 "$psw_admin_source" /usr/local/bin/psw-admin || return 1
+	install -o root -g root -m 0755 "$openvpn_admin_source" /usr/local/bin/openvpn-admin || return 1
 	if [[ ! -e /etc/openvpn/psw-file ]]; then
 		install -o root -g "$group_name" -m 0640 /dev/null /etc/openvpn/psw-file || return 1
 	else
@@ -175,9 +175,9 @@ install_psw_admin () {
 	if [[ -e /etc/openvpn/psw-file.meta.json ]]; then
 		chown root:"$group_name" /etc/openvpn/psw-file.meta.json && chmod 0640 /etc/openvpn/psw-file.meta.json || return 1
 	fi
-	configure_psw_admin_auth || return 1
+	configure_openvpn_admin_auth || return 1
 	rm -f /etc/openvpn/checkpsw.sh
-	env_file=/etc/default/psw-admin
+	env_file=/etc/openvpn/openvpn-admin
 	if [[ ! -e "$env_file" ]]; then
 		admin_password=$(openssl rand -hex 32) || return 1
 		(umask 077; cat > "$env_file" <<EOF
@@ -185,18 +185,19 @@ ADMIN_PASSWORD=$admin_password
 LISTEN_ADDR=0.0.0.0:8088
 PSW_FILE=/etc/openvpn/psw-file
 OPENVPN_STATUS_FILE=/etc/openvpn/server/openvpn-status.log
+CLIENT_FILE=${CLIENT_FILE:-/root/client.ovpn}
 PSW_FILE_MODE=0640
 PSW_FILE_GID=$group_id
 EOF
 		) || return 1
 		chmod 0600 "$env_file"
-		echo "psw-admin initial password: $admin_password"
+		echo "openvpn-admin initial password: $admin_password"
 	else
 		chmod 0600 "$env_file"
 		if ! grep -q '^ADMIN_PASSWORD=.' "$env_file"; then
 			admin_password=$(openssl rand -hex 32) || return 1
 			echo "ADMIN_PASSWORD=$admin_password" >> "$env_file"
-			echo "psw-admin initial password: $admin_password"
+			echo "openvpn-admin initial password: $admin_password"
 		fi
 		for setting in "LISTEN_ADDR=0.0.0.0:8088" "PSW_FILE=/etc/openvpn/psw-file" "OPENVPN_STATUS_FILE=/etc/openvpn/server/openvpn-status.log" "PSW_FILE_MODE=0640" "PSW_FILE_GID=$group_id"; do
 			key=${setting%%=*}
@@ -206,36 +207,25 @@ EOF
 				echo "$setting" >> "$env_file" || return 1
 			fi
 		done
+		if [[ -n "${CLIENT_FILE:-}" ]]; then
+			if grep -q '^CLIENT_FILE=' "$env_file"; then
+				sed -i "s|^CLIENT_FILE=.*|CLIENT_FILE=$CLIENT_FILE|" "$env_file" || return 1
+			else
+				echo "CLIENT_FILE=$CLIENT_FILE" >> "$env_file" || return 1
+			fi
+		elif ! grep -q '^CLIENT_FILE=' "$env_file"; then
+			echo 'CLIENT_FILE=/root/client.ovpn' >> "$env_file" || return 1
+		fi
 	fi
-	unit_file=/etc/systemd/system/psw-admin.service
-	if [[ -f "$SCRIPT_DIR/../deploy/psw-admin.service" ]]; then
-		install -m 0644 "$SCRIPT_DIR/../deploy/psw-admin.service" "$unit_file" || return 1
-	elif [[ ! -e "$unit_file" ]]; then
-		cat > "$unit_file" <<'EOF'
-[Unit]
-Description=OpenVPN password file management page
-After=network.target
-[Service]
-Type=simple
-EnvironmentFile=/etc/default/psw-admin
-ExecStart=/usr/local/bin/psw-admin serve
-Restart=on-failure
-RestartSec=3
-UMask=0077
-NoNewPrivileges=true
-ProtectHome=true
-ProtectSystem=full
-ReadWritePaths=/etc/openvpn
-[Install]
-WantedBy=multi-user.target
-EOF
-	fi
-	systemctl daemon-reload && systemctl enable psw-admin.service && systemctl restart psw-admin.service
+	unit_file=/etc/systemd/system/openvpn-admin.service
+	install -m 0644 "$SCRIPT_DIR/openvpn-admin.service" "$unit_file" || return 1
+	systemctl disable --now psw-admin.service 2>/dev/null || true
+	systemctl daemon-reload && systemctl enable openvpn-admin.service && systemctl restart openvpn-admin.service
 }
 
 if [[ ! -e /etc/openvpn/server/server.conf ]]; then
-	if ! resolve_psw_admin; then
-		echo "openvpn-admin binary not found. Build it into this directory or set PSW_ADMIN_BIN=/path/to/openvpn-admin before installing OpenVPN."
+	if ! resolve_openvpn_admin; then
+		echo "openvpn-admin binary not found. Build it into this directory or set OPENVPN_ADMIN_BIN=/path/to/openvpn-admin before installing OpenVPN."
 		exit 1
 	fi
         # Detect some Debian minimal setups where neither wget nor curl are installed
@@ -392,7 +382,11 @@ LimitNPROC=infinity" > /etc/systemd/system/openvpn-server@server.service.d/disab
         # Get easy-rsa
         easy_rsa_url='https://github.com/OpenVPN/easy-rsa/releases/download/v3.1.7/EasyRSA-3.1.7.tgz'
         mkdir -p /etc/openvpn/server/easy-rsa/
-        { wget -qO- "$easy_rsa_url" 2>/dev/null || curl -sL "$easy_rsa_url" ; } | tar xz -C /etc/openvpn/server/easy-rsa/ --strip-components 1
+        echo "Downloading Easy-RSA from GitHub..."
+        if ! { wget -T 15 -t 2 -qO- "$easy_rsa_url" 2>/dev/null || curl -fLsS --connect-timeout 10 --max-time 180 "$easy_rsa_url"; } | tar xz -C /etc/openvpn/server/easy-rsa/ --strip-components 1; then
+                echo "Easy-RSA download failed. Check this server's access to GitHub, then run the installer again."
+                exit 1
+        fi
         chown -R root:root /etc/openvpn/server/easy-rsa/
         cd /etc/openvpn/server/easy-rsa/
         # Create the PKI, set up the CA and the server and client certificates
@@ -603,7 +597,7 @@ auth SHA512
 auth-user-pass
 ignore-unknown-option block-outside-dns
 verb 3" > /etc/openvpn/server/client-common.txt
-        install_psw_admin || exit 1
+        install_openvpn_admin || exit 1
         # Enable and start the OpenVPN service
         systemctl enable --now openvpn-server@server.service
         # Generates the custom client.ovpn
@@ -623,7 +617,7 @@ else
         echo "   1) Add a new client"
         echo "   2) Revoke an existing client"
         echo "   3) Remove OpenVPN"
-        echo "   4) Install or update psw-admin"
+        echo "   4) Install or update openvpn-admin"
         echo "   5) Exit"
         read -p "Option: " option
         until [[ "$option" =~ ^[1-5]$ ]]; do
@@ -724,8 +718,8 @@ else
                                         semanage port -d -t openvpn_port_t -p "$protocol" "$port"
                                 fi
                                 systemctl disable --now openvpn-server@server.service
-								systemctl disable --now psw-admin.service 2>/dev/null || true
-								rm -f /etc/systemd/system/psw-admin.service /usr/local/bin/psw-admin
+								systemctl disable --now openvpn-admin.service psw-admin.service 2>/dev/null || true
+								rm -f /etc/systemd/system/openvpn-admin.service /etc/systemd/system/psw-admin.service /usr/local/bin/openvpn-admin /usr/local/bin/psw-admin
 								systemctl daemon-reload
                                 rm -f /etc/systemd/system/openvpn-server@server.service.d/disable-limitnproc.conf
                                 rm -f /etc/sysctl.d/99-openvpn-forward.conf
@@ -746,9 +740,9 @@ else
                         exit
                 ;;
                 4)
-                        install_psw_admin || exit 1
+                        install_openvpn_admin || exit 1
                         systemctl restart openvpn-server@server.service
-                        echo "psw-admin installed; status will appear after OpenVPN restarts."
+                        echo "openvpn-admin installed; status will appear after OpenVPN restarts."
                 ;;
                 5)
                         exit

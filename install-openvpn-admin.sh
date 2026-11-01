@@ -28,7 +28,6 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 
 install -o root -g root -m 0755 "$BINARY" "$INSTALL_PATH"
-ln -sfn "$INSTALL_PATH" /usr/local/bin/psw-admin
 if [[ ! -d /etc/openvpn ]]; then
 	install -d -o root -g root -m 0755 /etc/openvpn
 fi
