@@ -320,10 +320,12 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
         echo "   4) OpenDNS"
         echo "   5) Quad9"
         echo "   6) AdGuard"
-        read -p "DNS server [0]: " dns
-        until [[ -z "$dns" || "$dns" =~ ^[0-6]$ ]]; do
+        read -p "DNS server [1]: " dns
+        dns=${dns:-1}
+        until [[ "$dns" =~ ^[0-6]$ ]]; do
                 echo "$dns: invalid selection."
-                read -p "DNS server [0]: " dns
+                read -p "DNS server [1]: " dns
+                dns=${dns:-1}
         done
 
         echo "Select a VPN client subnet: 172.16.x.0/24"
