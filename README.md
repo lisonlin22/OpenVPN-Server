@@ -17,6 +17,8 @@ sudo PSW_ADMIN_BIN="$PWD/psw-admin" bash ./OpenVPN-Server/openvpn-install.sh
 
 首次安装时脚本会让你输入网段编号 `x`。例如输入 `22` 就使用 `172.16.22.0/24`，服务器隧道地址为 `172.16.22.1`；直接回车默认使用 `172.16.8.0/24`。
 
+安装完成后会生成 `/etc/openvpn/iptables`，其中网段和本机 IP 会使用安装时选择的值；服务器在 NAT 后时，脚本里写入的是服务器本机网卡 IP。需要重新应用规则时运行 `sudo /etc/openvpn/iptables`。该脚本保留 `iptables -F -t nat` 命令，会清空 NAT 表现有规则。
+
 已有 OpenVPN 服务器再次运行脚本时，选择 **4) Install or update psw-admin**。升级管理程序时先重新构建，再运行脚本并选择该项。
 
 ## 访问管理页面

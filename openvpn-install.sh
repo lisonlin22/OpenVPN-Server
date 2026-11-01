@@ -104,6 +104,26 @@ new_client () {
         } > ~/"$client".ovpn
 }
 
+write_iptables_script () {
+	cat > /etc/openvpn/iptables <<EOF
+#!/usr/bin/env bash
+
+# 开启内核转发
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# 重启 openvpn server
+systemctl restart openvpn-server@server.service
+
+# 配置 iptables
+iptables -F -t nat
+iptables -t nat -A POSTROUTING -s $network/24 -j SNAT --to-source $local_ip
+iptables -t nat -A POSTROUTING -s $network/24 ! -d $network/24 -j SNAT --to-source $local_ip
+iptables -A FORWARD -i tun+ -j ACCEPT
+iptables-save
+EOF
+	chmod 0755 /etc/openvpn/iptables
+}
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 
 resolve_psw_admin () {
@@ -240,6 +260,7 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
                 [[ -z "$ip_number" ]] && ip_number="1"
                 ip=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | sed -n "$ip_number"p)
         fi
+        local_ip=$ip
         # If $ip is a private IP address, the server must be behind NAT
         if echo "$ip" | grep -qE '^(10\.|172\.1[6789]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168)'; then
                 echo
@@ -590,8 +611,10 @@ verb 3" > /etc/openvpn/server/client-common.txt
         systemctl enable --now openvpn-server@server.service
         # Generates the custom client.ovpn
         new_client
+        write_iptables_script || exit 1
         echo
         echo "Finished!"
+        echo "Generated iptables script: /etc/openvpn/iptables"
         echo
         echo "The client configuration is available in:" ~/"$client.ovpn"
         echo "New clients can be added by running this script again."
