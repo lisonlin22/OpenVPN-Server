@@ -104,8 +104,8 @@ new_client () {
         } > ~/"$client".ovpn
 }
 
-write_iptables_script () {
-	cat > /etc/openvpn/iptables <<EOF
+print_iptables_script () {
+	cat <<EOF
 #!/usr/bin/env bash
 
 # 开启内核转发
@@ -121,7 +121,6 @@ iptables -t nat -A POSTROUTING -s $network/24 ! -d $network/24 -j SNAT --to-sour
 iptables -A FORWARD -i tun+ -j ACCEPT
 iptables-save
 EOF
-	chmod 0755 /etc/openvpn/iptables
 }
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
@@ -179,7 +178,7 @@ install_openvpn_admin () {
 	rm -f /etc/openvpn/checkpsw.sh
 	env_file=/etc/openvpn/openvpn-admin
 	if [[ ! -e "$env_file" ]]; then
-		admin_password=$(openssl rand -hex 32) || return 1
+		admin_password=Passw0rd123
 		(umask 077; cat > "$env_file" <<EOF
 ADMIN_PASSWORD=$admin_password
 LISTEN_ADDR=0.0.0.0:8088
@@ -191,13 +190,13 @@ PSW_FILE_GID=$group_id
 EOF
 		) || return 1
 		chmod 0600 "$env_file"
-		echo "openvpn-admin initial password: $admin_password"
+		echo "openvpn-admin default password: $admin_password"
 	else
 		chmod 0600 "$env_file"
 		if ! grep -q '^ADMIN_PASSWORD=.' "$env_file"; then
-			admin_password=$(openssl rand -hex 32) || return 1
+			admin_password=Passw0rd123
 			echo "ADMIN_PASSWORD=$admin_password" >> "$env_file"
-			echo "openvpn-admin initial password: $admin_password"
+			echo "openvpn-admin default password: $admin_password"
 		fi
 		for setting in "LISTEN_ADDR=0.0.0.0:8088" "PSW_FILE=/etc/openvpn/psw-file" "OPENVPN_STATUS_FILE=/etc/openvpn/server/openvpn-status.log" "PSW_FILE_MODE=0640" "PSW_FILE_GID=$group_id"; do
 			key=${setting%%=*}
@@ -602,13 +601,14 @@ verb 3" > /etc/openvpn/server/client-common.txt
         systemctl enable --now openvpn-server@server.service
         # Generates the custom client.ovpn
         new_client
-        write_iptables_script || exit 1
         echo
         echo "Finished!"
-        echo "Generated iptables script: /etc/openvpn/iptables"
         echo
         echo "The client configuration is available in:" ~/"$client.ovpn"
         echo "New clients can be added by running this script again."
+        echo
+        echo "iptables script for this server:"
+        print_iptables_script
 else
         clear
         echo "OpenVPN is already installed."

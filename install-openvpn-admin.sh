@@ -88,10 +88,9 @@ set_env() {
 }
 
 if ! grep -q '^ADMIN_PASSWORD=.' "$ENV_FILE"; then
-	command -v openssl >/dev/null || { echo "openssl is required to generate the admin password." >&2; exit 1; }
-	admin_password=$(openssl rand -hex 32)
+	admin_password=Passw0rd123
 	set_env ADMIN_PASSWORD "$admin_password"
-	echo "Initial admin password: $admin_password"
+	echo "openvpn-admin default password: $admin_password"
 fi
 set_env LISTEN_ADDR "${LISTEN_ADDR:-0.0.0.0:8088}"
 set_env PSW_FILE /etc/openvpn/psw-file

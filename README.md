@@ -13,11 +13,11 @@ go build -o OpenVPN-Server/openvpn-admin .
 sudo bash ./OpenVPN-Server/openvpn-install.sh
 ```
 
-安装脚本会将程序安装到 `/usr/local/bin/openvpn-admin`，配置 OpenVPN 使用 `via-file` 认证，并写入 `/etc/openvpn/server/openvpn-status.log` 在线状态。脚本创建 systemd 服务 `openvpn-admin.service`，管理页面默认监听 `0.0.0.0:8088`。首次安装会在终端显示随机管理员密码，请立即保存。
+安装脚本会将程序安装到 `/usr/local/bin/openvpn-admin`，配置 OpenVPN 使用 `via-file` 认证，并写入 `/etc/openvpn/server/openvpn-status.log` 在线状态。脚本创建 systemd 服务 `openvpn-admin.service`，管理页面默认监听 `0.0.0.0:8088`。首次安装默认管理员密码为 `Passw0rd123`；已有环境配置会保留。
 
 首次安装时脚本会让你输入网段编号 `x`。例如输入 `22` 就使用 `172.16.22.0/24`，服务器隧道地址为 `172.16.22.1`；直接回车默认使用 `172.16.8.0/24`。
 
-安装完成后会生成 `/etc/openvpn/iptables`，其中网段和本机 IP 会使用安装时选择的值；服务器在 NAT 后时，脚本里写入的是服务器本机网卡 IP。需要重新应用规则时运行 `sudo /etc/openvpn/iptables`。该脚本保留 `iptables -F -t nat` 命令，会清空 NAT 表现有规则。
+安装完成后，脚本会在终端打印对应的 iptables 脚本，网段和本机 IP 使用安装时选择的值；服务器在 NAT 后时，打印的是服务器本机网卡 IP。命令与 `OpenVPN-Server/iptables` 一致。脚本保留 `iptables -F -t nat`，执行时会清空 NAT 表现有规则。
 
 已有 OpenVPN 服务器再次运行脚本时，选择 **4) Install or update openvpn-admin**。升级管理程序时先重新构建，再运行脚本并选择该项。
 
