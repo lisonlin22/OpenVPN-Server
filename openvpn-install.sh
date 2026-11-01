@@ -331,9 +331,9 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
         echo "   5) Quad9"
         echo "   6) AdGuard"
         read -p "DNS server [0]: " dns
-        until [[ -z "$dns" || "$dns" =~ ^[1-6]$ ]]; do
+        until [[ -z "$dns" || "$dns" =~ ^[0-6]$ ]]; do
                 echo "$dns: invalid selection."
-                read -p "DNS server [1]: " dns
+                read -p "DNS server [0]: " dns
         done
 
         echo
@@ -366,12 +366,6 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
                 elif [[ "$os" == "debian" || "$os" == "ubuntu" ]]; then
                         # iptables is way less invasive than firewalld so no warning is given
                         firewall="iptables"
-                        echo "执行 iptables"
-                        iptables -F -t nat
-                        iptables -t nat -A POSTROUTING -s $network/24 -j SNAT --to-source $ip
-                        iptables -t nat -A POSTROUTING -s $network/24 ! -d $network/24 -j SNAT --to-source $ip
-                        iptables -A FORWARD -i tun+ -j ACCEPT
-                        iptables-save
                 fi
         fi
         read -n1 -r -p "Press any key to continue..."
@@ -510,7 +504,7 @@ crl-verify crl.pem" >> /etc/openvpn/server/server.conf
         # Enable without waiting for a reboot or service restart
 
         echo 1 > /proc/sys/net/ipv4/ip_forward
-        if [[ "$os" == "debian" || "$os" == "ubuntu" ]]; then
+        if { [[ "$os" == "debian" || "$os" == "ubuntu" ]]; } && ! systemctl is-active --quiet firewalld.service; then
             # iptables is way less invasive than firewalld so no warning is given
             echo "执行 iptables"
             iptables -F -t nat
