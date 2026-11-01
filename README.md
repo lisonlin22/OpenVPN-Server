@@ -9,8 +9,8 @@
 ```sh
 npm ci
 npm run build
-go build -o psw-admin .
-sudo PSW_ADMIN_BIN="$PWD/psw-admin" bash ./OpenVPN-Server/openvpn-install.sh
+go build -o OpenVPN-Server/openvpn-admin .
+sudo bash ./OpenVPN-Server/openvpn-install.sh
 ```
 
 安装脚本会将程序安装到 `/usr/local/bin/psw-admin`，配置 OpenVPN 使用 `via-file` 认证，并写入 `/etc/openvpn/server/openvpn-status.log` 在线状态。脚本创建 systemd 服务 `psw-admin.service`，管理页面默认监听 `0.0.0.0:8088`。首次安装会在终端显示随机管理员密码，请立即保存。

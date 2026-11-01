@@ -127,11 +127,14 @@ EOF
 SCRIPT_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 
 resolve_psw_admin () {
-	psw_admin_source="${PSW_ADMIN_BIN:-$(command -v psw-admin 2>/dev/null || true)}"
-	if [[ -z "$psw_admin_source" && -x "$SCRIPT_DIR/../psw-admin" ]]; then
-		psw_admin_source="$SCRIPT_DIR/../psw-admin"
-	fi
-	[[ -x "$psw_admin_source" ]]
+	local candidate
+	for candidate in "${PSW_ADMIN_BIN:-}" "$SCRIPT_DIR/openvpn-admin" "$SCRIPT_DIR/../openvpn-admin" "$(command -v openvpn-admin 2>/dev/null || true)" "$(command -v psw-admin 2>/dev/null || true)" "$SCRIPT_DIR/../psw-admin"; do
+		if [[ -n "$candidate" && -x "$candidate" ]]; then
+			psw_admin_source=$(readlink -f -- "$candidate")
+			return 0
+		fi
+	done
+	return 1
 }
 
 configure_psw_admin_auth () {
@@ -155,7 +158,7 @@ EOF
 install_psw_admin () {
 	local group_id env_file unit_file admin_password
 	if ! resolve_psw_admin; then
-		echo "psw-admin binary not found. Build it or set PSW_ADMIN_BIN to its path."
+		echo "openvpn-admin binary not found. Build it into this directory or set PSW_ADMIN_BIN to its path."
 		return 1
 	fi
 	group_id=$(getent group "$group_name" | cut -d: -f3)
@@ -232,7 +235,7 @@ EOF
 
 if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	if ! resolve_psw_admin; then
-		echo "psw-admin binary not found. Build it and set PSW_ADMIN_BIN=/path/to/psw-admin before installing OpenVPN."
+		echo "openvpn-admin binary not found. Build it into this directory or set PSW_ADMIN_BIN=/path/to/openvpn-admin before installing OpenVPN."
 		exit 1
 	fi
         # Detect some Debian minimal setups where neither wget nor curl are installed
