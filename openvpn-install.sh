@@ -104,7 +104,117 @@ new_client () {
         } > ~/"$client".ovpn
 }
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+
+resolve_psw_admin () {
+	psw_admin_source="${PSW_ADMIN_BIN:-$(command -v psw-admin 2>/dev/null || true)}"
+	if [[ -z "$psw_admin_source" && -x "$SCRIPT_DIR/../psw-admin" ]]; then
+		psw_admin_source="$SCRIPT_DIR/../psw-admin"
+	fi
+	[[ -x "$psw_admin_source" ]]
+}
+
+configure_psw_admin_auth () {
+	local config=/etc/openvpn/server/server.conf tmp
+	tmp=$(mktemp)
+	awk '
+		/^[[:space:]]*(auth-user-pass-verify|username-as-common-name|status|status-version)[[:space:]]/ { next }
+		/^[[:space:]]*script-security[[:space:]]/ { if (!security_seen++) print "script-security 3"; next }
+		{ print }
+		END { if (!security_seen) print "script-security 3" }
+	' "$config" > "$tmp" || { rm -f "$tmp"; return 1; }
+	cat >> "$tmp" <<'EOF'
+auth-user-pass-verify "/usr/local/bin/psw-admin verify-file -file /etc/openvpn/psw-file" via-file
+username-as-common-name
+status /etc/openvpn/server/openvpn-status.log 5
+status-version 1
+EOF
+	cat "$tmp" > "$config" && rm -f "$tmp"
+}
+
+install_psw_admin () {
+	local group_id env_file unit_file admin_password
+	if ! resolve_psw_admin; then
+		echo "psw-admin binary not found. Build it or set PSW_ADMIN_BIN to its path."
+		return 1
+	fi
+	group_id=$(getent group "$group_name" | cut -d: -f3)
+	if [[ -z "$group_id" ]]; then
+		echo "OpenVPN group '$group_name' was not found."
+		return 1
+	fi
+	install -o root -g root -m 0755 "$psw_admin_source" /usr/local/bin/psw-admin || return 1
+	if [[ ! -e /etc/openvpn/psw-file ]]; then
+		install -o root -g "$group_name" -m 0640 /dev/null /etc/openvpn/psw-file || return 1
+	else
+		chown root:"$group_name" /etc/openvpn/psw-file && chmod 0640 /etc/openvpn/psw-file || return 1
+	fi
+	if [[ -e /etc/openvpn/psw-file.meta.json ]]; then
+		chown root:"$group_name" /etc/openvpn/psw-file.meta.json && chmod 0640 /etc/openvpn/psw-file.meta.json || return 1
+	fi
+	configure_psw_admin_auth || return 1
+	rm -f /etc/openvpn/checkpsw.sh
+	env_file=/etc/default/psw-admin
+	if [[ ! -e "$env_file" ]]; then
+		admin_password=$(openssl rand -hex 32) || return 1
+		(umask 077; cat > "$env_file" <<EOF
+ADMIN_PASSWORD=$admin_password
+LISTEN_ADDR=0.0.0.0:8088
+PSW_FILE=/etc/openvpn/psw-file
+OPENVPN_STATUS_FILE=/etc/openvpn/server/openvpn-status.log
+PSW_FILE_MODE=0640
+PSW_FILE_GID=$group_id
+EOF
+		) || return 1
+		chmod 0600 "$env_file"
+		echo "psw-admin initial password: $admin_password"
+	else
+		chmod 0600 "$env_file"
+		if ! grep -q '^ADMIN_PASSWORD=.' "$env_file"; then
+			admin_password=$(openssl rand -hex 32) || return 1
+			echo "ADMIN_PASSWORD=$admin_password" >> "$env_file"
+			echo "psw-admin initial password: $admin_password"
+		fi
+		for setting in "LISTEN_ADDR=0.0.0.0:8088" "PSW_FILE=/etc/openvpn/psw-file" "OPENVPN_STATUS_FILE=/etc/openvpn/server/openvpn-status.log" "PSW_FILE_MODE=0640" "PSW_FILE_GID=$group_id"; do
+			key=${setting%%=*}
+			if grep -q "^$key=" "$env_file"; then
+				sed -i "s|^$key=.*|$setting|" "$env_file" || return 1
+			else
+				echo "$setting" >> "$env_file" || return 1
+			fi
+		done
+	fi
+	unit_file=/etc/systemd/system/psw-admin.service
+	if [[ -f "$SCRIPT_DIR/../deploy/psw-admin.service" ]]; then
+		install -m 0644 "$SCRIPT_DIR/../deploy/psw-admin.service" "$unit_file" || return 1
+	elif [[ ! -e "$unit_file" ]]; then
+		cat > "$unit_file" <<'EOF'
+[Unit]
+Description=OpenVPN password file management page
+After=network.target
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/psw-admin
+ExecStart=/usr/local/bin/psw-admin serve
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/openvpn
+[Install]
+WantedBy=multi-user.target
+EOF
+	fi
+	systemctl daemon-reload && systemctl enable psw-admin.service && systemctl restart psw-admin.service
+}
+
 if [[ ! -e /etc/openvpn/server/server.conf ]]; then
+	if ! resolve_psw_admin; then
+		echo "psw-admin binary not found. Build it and set PSW_ADMIN_BIN=/path/to/psw-admin before installing OpenVPN."
+		exit 1
+	fi
         # Detect some Debian minimal setups where neither wget nor curl are installed
         if ! hash wget 2>/dev/null && ! hash curl 2>/dev/null; then
                 echo "Wget is required to use this installer."
@@ -203,17 +313,16 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
         done
 
         echo
-        echo "Select a subnet network for the clients:"
-        echo "   1) 172.16.x.0/24"
-        
-        read -p "Subnet [1]: " subnet
-        until [[ -z "$subnet" || ("$subnet" =~ ^[0-9]+$ && "$subnet" -ge 1 && "$subnet" -le 250) ]]; do
-            echo "$subnet: invalid selection."
-            read -p "Subnet Select [1]: " subnet
-            subnet=${subnet:-1}  # 设置默认值为1如果用户直接回车
+        echo "Select a VPN client subnet: 172.16.x.0/24"
+        read -p "Enter x [8]: " subnet
+        subnet=${subnet:-8}
+        until [[ "$subnet" =~ ^[0-9]{1,3}$ ]] && (( 10#$subnet >= 1 && 10#$subnet <= 254 )); do
+                echo "$subnet: enter a number from 1 to 254."
+                read -p "Enter x [8]: " subnet
+                subnet=${subnet:-8}
         done
-        network="172.16.$subnet.0"
-        echo "OpenVpn Client Network : $network/24"
+        network="172.16.$((10#$subnet)).0"
+        echo "OpenVPN client network: $network/24; server tunnel IP: 172.16.$((10#$subnet)).1"
 
         echo
         echo "Enter a name for the first client:"
@@ -292,43 +401,6 @@ YdEIqUuyyOP7uWrat2DX9GgdT0Kj3jlN9K5W7edjcrsZCwenyO4KbXCeAvzhzffi
 ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
 -----END DH PARAMETERS-----' > /etc/openvpn/server/dh.pem
 
-        # copy checkpsw to openvpn
-        # cp -rp ./checkpsw.sh  /etc/openvpn/checkpsw.sh
-        echo '#!/bin/sh
-###########################################################
-# checkpsw.sh (C) 2004 Mathias Sundman <mathias@openvpn.se>
-#
-# This script will authenticate OpenVPN users against
-# a plain text file. The passfile should simply contain
-# one row per user with the username first followed by
-# one or more space(s) or tab(s) and then the password.
-PASSFILE="/etc/openvpn/psw-file"
-LOG_FILE="/var/log/openvpn-password.log"
-TIME_STAMP=$(date "+%Y-%m-%d %T")
-###########################################################
-
-if [ ! -r "${PASSFILE}" ]; then
-  echo "${TIME_STAMP}: Could not open password file \"${PASSFILE}\" for reading." >> ${LOG_FILE}
-  exit 1
-fi
-
-CORRECT_PASSWORD=$(awk '\''!/^;/&&!/^#/&&$1=="'\''${username}'\''"{print $2;exit}'\'' ${PASSFILE})
-
-if [ "${CORRECT_PASSWORD}" = "" ]; then 
-  echo "${TIME_STAMP}: User does not exist: username=\"${username}\", password=\"${password}\"." >> ${LOG_FILE}
-  exit 1
-fi
-
-if [ "${password}" = "${CORRECT_PASSWORD}" ]; then 
-  echo "${TIME_STAMP}: Successful authentication: username=\"${username}\"." >> ${LOG_FILE}
-  exit 0
-fi
-
-echo "${TIME_STAMP}: Incorrect password: username=\"${username}\", password=\"${password}\"." >> ${LOG_FILE}
-exit 1' > /etc/openvpn/checkpsw.sh
-        chmod +x /etc/openvpn/checkpsw.sh
-        # make psw-file
-        echo "lisonlin mpower22" > /etc/openvpn/psw-file
         # Generate server.conf
         echo "local $ip
 port $port
@@ -341,10 +413,7 @@ dh dh.pem
 auth SHA512
 tls-crypt tc.key
 topology subnet
-server $network 255.255.255.0
-auth-user-pass-verify /etc/openvpn/checkpsw.sh via-env
-username-as-common-name
-script-security 3" > /etc/openvpn/server/server.conf
+server $network 255.255.255.0" > /etc/openvpn/server/server.conf
         # IPv6
         if [[ -z "$ip6" ]]; then
                 echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
@@ -438,12 +507,12 @@ crl-verify crl.pem" >> /etc/openvpn/server/server.conf
                 # We don't use --add-service=openvpn because that would only work with
                 # the default port and protocol.
                 firewall-cmd --add-port="$port"/"$protocol"
-                firewall-cmd --zone=trusted --add-source=10.8.0.0/24
+                firewall-cmd --zone=trusted --add-source="$network/24"
                 firewall-cmd --permanent --add-port="$port"/"$protocol"
-                firewall-cmd --permanent --zone=trusted --add-source=10.8.0.0/24
+                firewall-cmd --permanent --zone=trusted --add-source="$network/24"
                 # Set NAT for the VPN subnet
-                firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
-                firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
+                firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s "$network/24" ! -d "$network/24" -j SNAT --to "$ip"
+                firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s "$network/24" ! -d "$network/24" -j SNAT --to "$ip"
                 if [[ -n "$ip6" ]]; then
                         firewall-cmd --zone=trusted --add-source=fddd:1194:1194:1194::/64
                         firewall-cmd --permanent --zone=trusted --add-source=fddd:1194:1194:1194::/64
@@ -516,6 +585,7 @@ auth SHA512
 auth-user-pass
 ignore-unknown-option block-outside-dns
 verb 3" > /etc/openvpn/server/client-common.txt
+        install_psw_admin || exit 1
         # Enable and start the OpenVPN service
         systemctl enable --now openvpn-server@server.service
         # Generates the custom client.ovpn
@@ -533,9 +603,10 @@ else
         echo "   1) Add a new client"
         echo "   2) Revoke an existing client"
         echo "   3) Remove OpenVPN"
-        echo "   4) Exit"
+        echo "   4) Install or update psw-admin"
+        echo "   5) Exit"
         read -p "Option: " option
-        until [[ "$option" =~ ^[1-4]$ ]]; do
+        until [[ "$option" =~ ^[1-5]$ ]]; do
                 echo "$option: invalid selection."
                 read -p "Option: " option
         done
@@ -608,15 +679,16 @@ else
                         if [[ "$remove" =~ ^[yY]$ ]]; then
                                 port=$(grep '^port ' /etc/openvpn/server/server.conf | cut -d " " -f 2)
                                 protocol=$(grep '^proto ' /etc/openvpn/server/server.conf | cut -d " " -f 2)
+                                network=$(awk '$1 == "server" {print $2; exit}' /etc/openvpn/server/server.conf)
                                 if systemctl is-active --quiet firewalld.service; then
-                                        ip=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING | grep '\-s 10.8.0.0/24 '"'"'!'"'"' -d 10.8.0.0/24' | grep -oE '[^ ]+$')
+                                        ip=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING | grep -F -- "-s $network/24" | grep -oE '[^ ]+$' | head -n 1)
                                         # Using both permanent and not permanent rules to avoid a firewalld reload.
                                         firewall-cmd --remove-port="$port"/"$protocol"
-                                        firewall-cmd --zone=trusted --remove-source=10.8.0.0/24
+                                        firewall-cmd --zone=trusted --remove-source="$network/24"
                                         firewall-cmd --permanent --remove-port="$port"/"$protocol"
-                                        firewall-cmd --permanent --zone=trusted --remove-source=10.8.0.0/24
-                                        firewall-cmd --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
-                                        firewall-cmd --permanent --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
+                                        firewall-cmd --permanent --zone=trusted --remove-source="$network/24"
+                                        firewall-cmd --direct --remove-rule ipv4 nat POSTROUTING 0 -s "$network/24" ! -d "$network/24" -j SNAT --to "$ip"
+                                        firewall-cmd --permanent --direct --remove-rule ipv4 nat POSTROUTING 0 -s "$network/24" ! -d "$network/24" -j SNAT --to "$ip"
                                         if grep -qs "server-ipv6" /etc/openvpn/server/server.conf; then
                                                 ip6=$(firewall-cmd --direct --get-rules ipv6 nat POSTROUTING | grep '\-s fddd:1194:1194:1194::/64 '"'"'!'"'"' -d fddd:1194:1194:1194::/64' | grep -oE '[^ ]+$')
                                                 firewall-cmd --zone=trusted --remove-source=fddd:1194:1194:1194::/64
@@ -632,6 +704,9 @@ else
                                         semanage port -d -t openvpn_port_t -p "$protocol" "$port"
                                 fi
                                 systemctl disable --now openvpn-server@server.service
+								systemctl disable --now psw-admin.service 2>/dev/null || true
+								rm -f /etc/systemd/system/psw-admin.service /usr/local/bin/psw-admin
+								systemctl daemon-reload
                                 rm -f /etc/systemd/system/openvpn-server@server.service.d/disable-limitnproc.conf
                                 rm -f /etc/sysctl.d/99-openvpn-forward.conf
                                 if [[ "$os" = "debian" || "$os" = "ubuntu" ]]; then
@@ -651,6 +726,11 @@ else
                         exit
                 ;;
                 4)
+                        install_psw_admin || exit 1
+                        systemctl restart openvpn-server@server.service
+                        echo "psw-admin installed; status will appear after OpenVPN restarts."
+                ;;
+                5)
                         exit
                 ;;
         esac

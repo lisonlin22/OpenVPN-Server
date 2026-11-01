@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenVPN account management web service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/openvpn/openvpn-admin
+ExecStart=/usr/local/bin/openvpn-admin serve
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=full
+ReadWritePaths=/etc/openvpn
+
+[Install]
+WantedBy=multi-user.target
